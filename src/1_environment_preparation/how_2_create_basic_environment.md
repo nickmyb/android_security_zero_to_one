@@ -322,7 +322,7 @@ root@Nick:~/Downloads/sailfish-opm1.171019.011# rm -rf image-sailfish-opm1.17101
 
 - 我这边准备了照片版的刷机全过程和一段自己随手录制的刷机视频，配合下面的操作步骤食用更香！
     - 图片版请解压网盘的flash_pixel.7z
-    - [视频版链接](腾讯视频审核太慢了，等待补充链接)
+    - [视频版链接](https://v.qq.com/x/page/e3140g5p34x.html?pcsharecode=uKzaKUOY)
 
 1. 先按住 `手机音量下键` 然后同时按住 `电源键` 保持一段时间 直到出现Android机器人 进入 bootloader模式
 
