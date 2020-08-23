@@ -8,7 +8,7 @@
 
 ![肉丝的星球-大家一起来玩](./static/r0ysue.jpg)
 
-[如果不想折腾可以直接到网盘拿配置完的虚拟机镜像以及这篇文章中你需要的东西 提取码：wale](链接：https://pan.baidu.com/s/1z1kllkZFz4aIskyXJqyCcA)
+[如果不想折腾可以直接到网盘拿配置完的虚拟机镜像以及这篇文章中你需要的东西 提取码：wale](https://pan.baidu.com/s/1z1kllkZFz4aIskyXJqyCcA)
 
 
 ## 1. 硬件配置
