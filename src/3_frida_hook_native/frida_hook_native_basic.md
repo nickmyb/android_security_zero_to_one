@@ -9,9 +9,7 @@ FRIDA hook Native基础
 
 [相关内容全部上传百度网盘 提取码：ljt1](https://pan.baidu.com/s/1__B7dnZ2xKBdXTNE_sklZg)
 
-[大黑客sakura的同一课程的学习笔记](https://eternalsakura13.com/2020/07/04/frida/
-
-)
+[大黑客sakura的同一课程的学习笔记](https://eternalsakura13.com/2020/07/04/frida/)
 
 ## 1. NDK开发入门
 
@@ -569,6 +567,8 @@ Java_com_example_reflect_MainActivity_invokeTestFromJNI(
 
 ## 3. IDA调试so基本思路：开发一个Frida反调试
 
+完整项目在 3_AntiFrida.7z + 3_libnative-lib.so.anti_frida_patched + 3_libnative-lib.so.original
+
 - 几个Frida反调试案例
     - [frida-detection-demo](https://github.com/b-mueller/frida-detection-demo)
     - [AntiFrida](https://github.com/qtfreet00/AntiFrida)
@@ -772,24 +772,1333 @@ libnative-lib.so                                 0x726de9f000  12288 (12.0 KiB) 
 
 ```
 
-#### patch so
+#### 3.2.2.3 patch so
 
 ```bash
-root@Nick:~/Downloads/# adb push libnative-lib.so.anti_frida_patched /sdcard/Download/
+root@Nick:~/Downloads/# adb push 3_libnative-lib.so.anti_frida_patched /sdcard/Download/
 
 sailfish:/ $ su
 
 sailfish:/ # cd /data/app/com.example.antifrida-SwKcSsHgcvghJstE1gnqZg==/lib/arm64/
 
-sailfish:/data/app/com.example.antifrida-SwKcSsHgcvghJstE1gnqZg==/lib/arm64/ # cp /sdcard/Download/libnative-lib.so.anti_frida_patched libnative-lib.so
+sailfish:/data/app/com.example.antifrida-SwKcSsHgcvghJstE1gnqZg==/lib/arm64/ # cp /sdcard/Download/3_libnative-lib.so.anti_frida_patched libnative-lib.so
 
-127|sailfish:/data/app/com.example.antifrida-SwKcSsHgcvghJstE1gnqZg==/lib/arm64/ # chmod 755 libnative-lib.so.anti_frida_patched
+127|sailfish:/data/app/com.example.antifrida-SwKcSsHgcvghJstE1gnqZg==/lib/arm64/ # chmod 755 3_libnative-lib.so.anti_frida_patched
 ```
 
 对于加载的so需要做完整性校验否则硬编码就可以被修改
 
-## x. 几个观点
+## 4. java native / 符号 / JNI(art) / libc hook
+
+完整项目在 4_Reflect.7z + 3_AntiFrida.7z + 4_anti_frida.js + 4_reflect.js
+
+- 推荐几个链接
+    - [教我兄弟学Android逆向系列课程](https://www.52pojie.cn/thread-742703-1-1.html)
+    - [彻底搞清楚 GOT 和 PLT](https://www.jianshu.com/p/5092d6d5caa3)
+
+ELF里面的GOT段/PLT段找到当前的符号，链接到偏移的地址，然后拿到符号进行跳转，ELF结构分节和区，里面就有GOT/PLT区表。
+
+Frida的native hook主要分为符号hook(PLT/GOT hook) 和 inline hook
+
+### 4.1 IDA导入jni.h
+
+1. 复制出jni.h(~/Android/Sdk/ndk/21.0.6113669/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/jni.h，不同的apk只需要导入一次jni.h即可)
+
+2. 导入 jni.h (左上角工具栏 File - Load file - Parse C header file - 打开)让IDA完整反编译出_JNIEnv *
+
+3. 导入会报错， 删除jni报错对应的.h， 重新导入
+
+4. 如果编译的函数参数不是_JNIEnv *，就右键修改一下  如果没有用到函数的参数,那IDA反编译不会显示这个参数的
+
+### 4.2 so研究方式
+
+主要就是通过trace来观察so层的行为
+
+/root/Codes/Reflect/app/src/main/java/com/example/reflect/MainActivity.java
+
+在onCreate添加了一下调用native函数的死循环用于后面的so层hook实验
+
+```
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        // Example of a call to a native method
+        TextView tv = findViewById(R.id.sample_text);
+        tv.setText(stringFromJNI());
+
+        Log.i("native-lib", "getStringLengthFromJNI(\"hello\") = " + String.valueOf(getStringLengthFromJNI("hello")));
+        Log.i("native-lib", "changeString2HelloFromJNI(\"Hello World!\") = " + changeString2HelloFromJNI("Hello World!"));
+        Log.i("native-lib", "staticStringFromJNI() = " + MainActivity.staticStringFromJNI());
+
+        // test reflect
+        testClazz();
+        testField();
+        testMethod();
+
+        // invoke class Test from JNI
+        String retFromJNI = invokeTestFromJNI();
+        Log.i("retFromJNI", retFromJNI);
+
+        while (true) {
+            try {
+                Thread.sleep(2000);
+                // Do some stuff
+            } catch (Exception e) {
+                e.getLocalizedMessage();
+            }
+            Log.i("while in onCreate", changeString2HelloFromJNI("string in Java"));
+        }
+    }
+```
+
+reflect.js
+
+```
+/*
+ * frida -H 192.168.50.42:8888 com.example.reflect -l agent/reflect.js
+ */
+
+
+// 检查 以module_name_pattern开头 的 module(即so) 是否存在在当前apk
+function if_module_existed(module_name_pattern) {
+    var modules = Process.enumerateModules()
+    var module = null
+    var existed = false
+
+    for (var i = 0; i < modules.length; i++) {
+        module = modules[i]
+
+        if (module.name.indexOf(module_name_pattern) != -1) {
+            if (!existed) {
+                console.log('search module_name_pattern[' + module_name_pattern + '] found:')
+                console.log()
+                existed = !existed
+            }
+            console.log('module.name = ' + module.name)
+            console.log('module.base = ' + module.base)
+            console.log()
+        }
+    }
+    return existed
+}
+
+
+function get_symbol_offset() {
+    var libnative_lib_so_name = "libnative-lib.so"
+    var existed = if_module_existed(libnative_lib_so_name)
+    if (existed) {
+        console.log(libnative_lib_so_name, 'is existed!')
+    } else {
+        console.log(libnative_lib_so_name, 'is not existed!')
+    }
+
+    var libnative_lib_so_address  = Module.findBaseAddress(libnative_lib_so_name)
+    console.log("libnative_lib_so_address =", libnative_lib_so_address)
+
+    // 先找到module然后找到想要hook的符号
+    if (libnative_lib_so_address) {
+        var symbol_name = null
+        var symbol_address = null
+
+        var symbol_name = 'Java_com_example_reflect_MainActivity_changeString2HelloFromJNI'
+        symbol_address = Module.findExportByName(libnative_lib_so_name, symbol_name)
+        console.log(symbol_name + ' address = ' + symbol_address)
+        console.log(symbol_name + ' offset =', '0x' + (symbol_address - libnative_lib_so_address).toString(16))
+    }
+}
+
+
+// 需要定义async函数且frida使用v8 --runtime=v8
+// async function sleep() {
+//     await new Promise(r => setTimeout(r, 5000))
+// }
+
+
+// 符号hook
+function symbol_hook() {
+    // spawn 需要延迟执行否则libnative-lib.so还没有加载, 使用 setTimeout 或者 代码里加sleep
+    // TODO 问: 对于只执行一次的native函数,spawn的时候so还没有加载怎么hook?
+    var libnative_lib_so_name = "libnative-lib.so"
+    var existed = if_module_existed(libnative_lib_so_name)
+    if (existed) {
+        console.log(libnative_lib_so_name, 'is existed!')
+    } else {
+        console.log(libnative_lib_so_name, 'is not existed!')
+    }
+
+    var libnative_lib_so_address  = Module.findBaseAddress(libnative_lib_so_name)
+    console.log("libnative_lib_so_address =", libnative_lib_so_address)
+
+    // 先找到module然后找到想要hook的符号
+    if (libnative_lib_so_address) {
+        var symbol_name = null
+        var symbol_address = null
+
+        var symbol_name = 'Java_com_example_reflect_MainActivity_changeString2HelloFromJNI'
+        symbol_address = Module.findExportByName(libnative_lib_so_name, symbol_name)
+        console.log(symbol_name + ' address = ' + symbol_address)
+        console.log(symbol_name + ' offset =', '0x' + (symbol_address - libnative_lib_so_address).toString(16))
+    }
+
+    Interceptor.attach(symbol_address, {
+        onEnter: function(args) {
+            // args 是 jstring
+
+            // Java_com_example_reflect_MainActivity_changeString2HelloFromJNI 三个参数
+            console.log(symbol_address, "raw args[0], args[1], args[2]:", args[0], args[1], args[2])
+
+            // 打印方式1
+            // 星球jbytearray
+            // 可能需要使用32位机器,sailfish这边是Error: access violation accessing 0x7133cabb8
+            // var args2_address = args[2].readPointer()
+            // console.log(hexdump(args2_address))
+
+            // 打印方式2
+            // 通过JNI接口打印jstring, 注意需要对应到frida的api, 不要直接使用java的
+            // https://github.com/frida/frida-java-bridge/blob/062999b618451e5ac414d08d4f52bec05bd6adf6/lib/env.js
+            console.log('args[2]:', Java.vm.getEnv().getStringUtfChars(args[2], null).readCString())
+        },
+        onLeave: function(ret) {
+            // ret 是 jstring
+            console.log("raw ret:", ret)
+            console.log('ret:', Java.vm.getEnv().getStringUtfChars(ret, null).readCString())
+            var new_ret = Java.vm.getEnv().newStringUtf("new_ret from " + symbol_name)
+
+            // 替换返回值
+            ret.replace(ptr(new_ret))
+        }
+    })
+}
+
+
+// https://github.com/chame1eon/jnitrace
+function hook_libart_so() {
+    var libart_so_name = "libart.so"
+    var existed = if_module_existed(libart_so_name)
+    if (existed) {
+        console.log(libart_so_name, 'is existed!')
+    } else {
+        console.log(libart_so_name, 'is not existed!')
+    }
+
+    var libart_so_address  = Module.findBaseAddress(libart_so_name)
+    console.log("libart_so_address =", libart_so_address)
+
+    // 由于 name mangling 导致符号被混淆(name mangling也不是完全混淆,真实函数名还是包含在结果中的), 所以需要枚举所有符号
+    // 不要用 Process.findModuleByName(module_name).enumerateSymbols() 符号可能枚举结果为空
+    var symbols = Module.enumerateSymbolsSync(libart_so_name)
+    var jni_function_name = 'GetStringUTFChars'
+    var jni_function_address = null
+
+    for (var i = 0; i < symbols.length; i++){
+        var symbol = symbols[i]
+        if((symbol.name.indexOf("CheckJNI") == -1) && (symbol.name.indexOf("JNI") >= 0)) {
+            if (symbol.name.indexOf(jni_function_name) >= 0) {
+                console.log('symbol.name =', symbol.name)
+                console.log('symbol.address =', symbol.address)
+                jni_function_address = symbol.address
+            }
+        }
+    }
+    console.log(jni_function_name + ' address =', jni_function_address)
+
+    // JNI 的 GetStringUTFChars 竟然可以打印android的Log.i, 陈总建议是可以看native的log实现, 然而现在并看不懂
+    Interceptor.attach(jni_function_address, {
+        onEnter: function(args) {
+            console.log(jni_function_name + " args[0] =", args[0])
+            console.log(jni_function_name + " args[1] =", args[1])
+
+            // args[0] 是 JNIEnv
+            // JNIEnv 可以用 hexdump(args[0].readPointer()), jxxx参数不能用, 要调用JNI的方法打印
+            console.log('hexdump args[0] =', hexdump(args[0].readPointer()))
+            // args[1] 是 jstring, 不能用hexdump
+            // console.log('hexdump args[1] =', hexdump(args[1].readPointer()))
+            // 两个接口 getEnv / tryGetEnv
+            console.log('args[1] =', Java.vm.getEnv().getStringUtfChars(args[1]).readCString())
+            // console.log('args[1] =', Java.vm.tryGetEnv().getStringUtfChars(args[1]).readCString())
+
+            // 打印调用栈: https://frida.re/docs/javascript-api/
+            var trace_back_log = Thread.backtrace(this.context, Backtracer.ACCURATE).map(DebugSymbol.fromAddress).join('\n')
+            console.log(jni_function_name + ' traceback:\n' + trace_back_log + '\n')
+        },
+        onLeave: function(ret) {
+            // char * 可以直接打印 ptr(ret).readCString()
+            console.log(jni_function_name + " ret =", ptr(ret).readCString())
+        }
+    })
+}
+
+
+function main() {
+    // get_symbol_offset()
+
+    // symbol_hook()
+
+    hook_libart_so()
+}
+
+
+setImmediate(main)
+
+```
+
+anti_frida.js
+
+```
+/*
+ * frida -H 192.168.50.42:8888 -f com.example.antifrida -l agent/anti_frida.js
+ */
+
+// 1. 对native函数的hook，和普通java函数一致
+function remove_antiFrida() {
+    // 避免logcat日志过多无法看出来hook native函数是否生效，先清理一下logcat日志
+    // 清除logcat日志: adb logcat -c
+
+    var MainActivity = Java.use('com.example.antifrida.MainActivity')
+    MainActivity.antiFrida.implementation = function() {
+        console.log('enter remove_antiFrida')
+        return
+    }
+}
+
+
+// 检查 以module_name_pattern开头 的 module(即so) 是否存在在当前apk
+function if_module_existed(module_name_pattern) {
+    var modules = Process.enumerateModules()
+    var module = null
+    var existed = false
+
+    for (var i = 0; i < modules.length; i++) {
+        module = modules[i]
+
+        if (module.name.indexOf(module_name_pattern) != -1) {
+            if (!existed) {
+                console.log('search module_name_pattern[' + module_name_pattern + '] found:')
+                console.log()
+                existed = !existed
+            }
+            console.log('module.name = ' + module.name)
+            console.log('module.base = ' + module.base)
+            console.log()
+        }
+    }
+    return existed
+}
+
+
+function enumerate_modules_and_exports(module_name) {
+    // 枚举符号和导出符号
+    // symbols > exports
+    // 但enumerateSymbols可能搜索结果为空，并且as打包生成的so会出现有导出符号没有符号的情况，不知道是做了什么配置，日常请使用sync版本
+    // var symbols = Process.findModuleByName(libnative_lib_so_name).enumerateSymbols()
+    // var symbols = Module.enumerateSymbolsSync(libnative_lib_so_name)
+
+    // var symbols = Process.findModuleByName(module_name).enumerateSymbols()
+    var symbols = Module.enumerateSymbolsSync(module_name)
+    var exports = Process.findModuleByName(module_name).enumerateExports()
+}
+
+
+// 2. 找到偏移
+function get_symbol_offset() {
+    // root@Nick:~# objection -N -h 192.168.50.42 -p 8888 -g com.example.antifrida explore
+    // com.example.antifrida on (google: 8.1.0) [net] # memory list modules
+
+    // 找到:
+    // libnative-lib.so                                 0x72b6e6c000  12288 (12.0 KiB)      /data/app/com.example.antifrida-cUCV8773Ge8uJPawmLlRPw==/lib/arm64/libnativ...
+
+    var libnative_lib_so_name = "libnative-lib.so"
+    var existed = if_module_existed('libnative')
+    if (existed) {
+        console.log(libnative_lib_so_name, 'is existed!')
+    } else {
+        console.log(libnative_lib_so_name, 'is not existed!')
+    }
+
+    // 找到基址, app重启后基址和导出函数地址是会变化的, 但偏移量是固定的
+    var libnative_lib_so_address  = Module.findBaseAddress(libnative_lib_so_name)
+    console.log("libnative_lib_so_address =", libnative_lib_so_address)
+
+    // 先找到module然后找到想要hook的符号
+    if (libnative_lib_so_address) {
+        // 由于namemagling导致符号被混淆, detect_frida_loop 的导出符号是 _Z17detect_frida_loopPv
+        // extern "C" JNIEXPORT void JNICALL Java_com_example_antifrida_MainActivity_antiFrida
+        var symbol_name = null
+        var symbol_address = null
+
+        var symbol_name = 'Java_com_example_antifrida_MainActivity_antiFrida'
+        symbol_address = Module.findExportByName(libnative_lib_so_name, symbol_name)
+        console.log(symbol_name + ' address = ' + symbol_address)
+        // 偏移量是固定的, 和Frida的IDA-View按空格显示的偏移一致
+        console.log(symbol_name + ' offset =', '0x' + (symbol_address - libnative_lib_so_address).toString(16))
+
+        symbol_name = '_Z17detect_frida_loopPv'
+        symbol_address = Module.findExportByName(libnative_lib_so_name, symbol_name)
+        console.log(symbol_name + ' address = ' + symbol_address)
+        console.log(symbol_name + ' offset =', '0x' + (symbol_address - libnative_lib_so_address).toString(16))
+    }
+}
+
+
+function hook_libc_so() {
+    var libc_so_name = "libc.so"
+    var existed = if_module_existed(libc_so_name)
+    if (existed) {
+        console.log(libc_so_name, 'is existed!')
+    } else {
+        console.log(libc_so_name, 'is not existed!')
+    }
+
+    var libc_so_address  = Module.findBaseAddress(libc_so_name)
+    console.log("libc_so_address =", libc_so_address)
+
+    var libc_function_name = 'pthread_create'
+    var libc_function_address = null
+
+    var symbols = null
+
+    symbols = Module.enumerateSymbolsSync(libc_so_name)
+
+    // C函数名字该是什么就是什么
+    // objection: memory list exports libc.so --json libc_so.json
+    for (var i = 0; i < symbols.length; i++) {
+        var symbol = symbols[i]
+        var name = symbol.name
+        var address = symbol.address
+        // 使用android native中的方法名
+        if ((name.indexOf(libc_function_name) >= 0) && (name.indexOf(".cpp") == -1)) {
+            console.log('name:', name)
+            console.log('address:', address)
+
+            libc_function_address = address
+        }
+    }
+
+    Interceptor.attach(libc_function_address, {
+        onEnter: function(args) {
+            console.log(libc_function_name, 'arg[0] =', args[0])
+            console.log(libc_function_name, 'arg[1] =', args[1])
+            console.log(libc_function_name, 'arg[2] =', args[2])
+            console.log(libc_function_name, 'arg[3] =', args[3])
+        },
+        onLeave: function(ret) {
+            console.log('ret =', ret)
+        }
+    })
+}
+
+
+function main() {
+    // Java.perform(remove_antiFrida)
+
+    // get_symbol_offset()
+
+    hook_libc_so()
+}
+
+
+setImmediate(main)
+
+```
+
+## 5. JNI_Onload / 主动调用 / inline_hook
+
+完整项目在 5_Reflect.7z + 5_AntiFrida.7z + + 5_anti_frida.js + 5_reflect.js
+
+- 推荐几个链接
+    - [ndk-samples](https://github.com/android/ndk-samples.git)
+    - [Android逆向新手答疑解惑篇——JNI与动态注册](https://bbs.pediy.com/thread-224672.htm)
+    - [Java与Native相互调用](https://www.jianshu.com/p/b71aeb4ed13d)
+
+### 5.1 动态注册
+
+- 注册native函数的方式
+    1. 静态注册: Java_com_example_demo_MainActivity_stringFromJNI
+    2. 动态注册: RegisterNatives
+
+#### 5.1.1 JNI_OnLoad动态注册
+
+/root/Codes/Reflect/app/src/main/java/com/example/antifrida/MainActivity.java 修改onCreate 并添加 native方法 dynamicallyRegisteredStringFromJNI
+
+```
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        // Example of a call to a native method
+        TextView tv = findViewById(R.id.sample_text);
+        tv.setText(stringFromJNI());
+
+        Log.i("native-lib", "getStringLengthFromJNI(\"hello\") = " + String.valueOf(getStringLengthFromJNI("hello")));
+        Log.i("native-lib", "changeString2HelloFromJNI(\"Hello World!\") = " + changeString2HelloFromJNI("Hello World!"));
+        Log.i("native-lib", "staticStringFromJNI() = " + MainActivity.staticStringFromJNI());
+
+        // test reflect
+        testClazz();
+        testField();
+        testMethod();
+
+        // invoke class Test from JNI
+        String retFromJNI = invokeTestFromJNI();
+        Log.i("retFromJNI", retFromJNI);
+
+        while (true) {
+            try {
+                Thread.sleep(2000);
+                // Do some stuff
+            } catch (Exception e) {
+                e.getLocalizedMessage();
+            }
+            Log.i("while in onCreate", changeString2HelloFromJNI("string in Java"));
+            Log.i("RegisterNatives", dynamicallyRegisteredStringFromJNI());
+        }
+    }
+
+    // IDA中找不到动态注册的dynamicallyRegisteredStringFromJNI
+    public native String dynamicallyRegisteredStringFromJNI();
+```
+
+/root/Codes/Reflect/app/src/main/cpp/native-lib.cpp 添加下面两个方法用于主动注册
+
+```
+// 去除了extern "C", 这样会被name mangling
+JNIEXPORT jstring JNICALL
+dynamicallyRegisteredString(
+        JNIEnv *env,
+        jobject thiz) {
+    std::string str = "dynamicallyRegisteredStringFromJNI";
+    return env->NewStringUTF(str.c_str());
+}
+
+// 在jni.h中定义但没有实现, 类似Activity的onCreate
+JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved)
+{
+    JNIEnv *env;
+    // 通过JavaVM获取JNIEnv
+    vm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    JNINativeMethod methods[] = {
+            // Java中native函数名, (参数)返回值, native函数
+            // 当参数为引用类型的时候，参数类型的标识为"L包名", 其中包名的.(点)要换成"/"
+            {"dynamicallyRegisteredStringFromJNI", "()Ljava/lang/String;", (void*)dynamicallyRegisteredString},
+    };
+    // 第一个参数: native函数所在的类，可通过FindClass获取(将.换成/)
+    // 第二个参数: 一个数组，其中包含注册信息
+    // 第三个参数: 数量
+    env->RegisterNatives(env->FindClass("com/example/reflect/MainActivity"), methods, 1);
+    return JNI_VERSION_1_6;
+}
+
+```
+
+#### 5.1.2 trace libart
+
+应该花时间多看大佬们写的代码,先抄后理解
+
+- RegisterNatives / libart(JNI)
+    - [frida_hook_libart](https://github.com/lasting-yang/frida_hook_libart)
+
+注意hook时机,例如hook RegisterNatives就需要用spawn的方式启动
+
+#### 5.1.3 frida反调试
+
+- 修改AOSP源码过反调试,直接修改源码做到打印
+    - [修改AOSP源码过反调试](https://bbs.pediy.com/thread-255653.htm)
+
+#### 5.1.4 主动调用native函数
+
+Interceptor.replace
+
+reflect.js
+
+```
+// https://frida.re/docs/javascript-api/
+// Interceptor.replace
+function native_initiatively_invoke() {
+    var module_name = 'libnative-lib.so'
+    var function_name = 'Java_com_example_reflect_MainActivity_changeString2HelloFromJNI'
+    var Java_com_example_reflect_MainActivity_changeString2HelloFromJNI_address = Module.getExportByName(module_name, function_name)
+    var Java_com_example_reflect_MainActivity_changeString2HelloFromJNI = new NativeFunction(Java_com_example_reflect_MainActivity_changeString2HelloFromJNI_address, 'pointer', ['pointer', 'pointer', 'pointer'])
+
+    // Interceptor.attach只能hook和修改返回值, Interceptor.replace可以主动调用
+    Interceptor.replace(Java_com_example_reflect_MainActivity_changeString2HelloFromJNI_address, new NativeCallback(function(env, thiz, j_str) {
+        var str = Java.vm.getEnv().getStringUtfChars(j_str).readCString()
+        console.log('j_str =', str)
+
+        // 主动调用
+        // var ret = Java_com_example_reflect_MainActivity_changeString2HelloFromJNI(env, thiz, j_str)
+        // 替换参数的主动调用
+        // 创建一个 jstring: Java.vm.getEnv().newStringUtf(""), 创建一个 char*: Memory.allocUtf8String("")
+        var new_j_str = Java.vm.getEnv().newStringUtf("HelloHello")
+        var ret = Java_com_example_reflect_MainActivity_changeString2HelloFromJNI(env, thiz, new_j_str)
+
+        // 但这里也没有做到完全的主动调用, replace是类似于Java.choose, native new参数解决就是真正的主动调用了
+        return ret
+    }, 'pointer', ['pointer', 'pointer', 'pointer']))
+}
+
+```
+
+anti_frida.js
+
+```
+function anti_anti_frida() {
+    var libnative_lib_so_name = "libnative-lib.so"
+    var existed = if_module_existed(libnative_lib_so_name)
+    if (existed) {
+        console.log(libnative_lib_so_name, 'is existed!')
+    } else {
+        console.log(libnative_lib_so_name, 'is not existed!')
+    }
+
+    var libnative_lib_so_address  = Module.findBaseAddress(libnative_lib_so_name)
+    console.log("libnative_lib_so_address =", libnative_lib_so_address)
+
+    var detect_frida_loop_name = 'detect_frida_loop'
+    var detect_frida_loop_address = null
+
+    var symbols = null
+
+    // 坑坑坑!!!
+    // 找自己用as写的native函数要enumerateExportsSync, 不能enumerateSymbolsSync
+    symbols = Module.enumerateExportsSync(libnative_lib_so_name)
+
+    for (var i = 0; i < symbols.length; i++) {
+        var symbol = symbols[i]
+        var name = symbol.name
+        var address = symbol.address
+        if (name.indexOf(detect_frida_loop_name) >= 0) {
+            console.log('name:', name)
+            console.log('address:', address)
+
+            detect_frida_loop_address = address
+        }
+    }
+
+    // detect_frida_loop地址如下, 可以利用后三位地址偏移特征进行过滤
+    // 0x72b6f34a7c
+    // 0x72b6e97a7c
+
+
+    var libc_so_name = "libc.so"
+    var existed = if_module_existed(libc_so_name)
+    if (existed) {
+        console.log(libc_so_name, 'is existed!')
+    } else {
+        console.log(libc_so_name, 'is not existed!')
+    }
+
+    var libc_so_address  = Module.findBaseAddress(libc_so_name)
+    console.log("libc_so_address =", libc_so_address)
+
+    var libc_function_name = 'pthread_create'
+    var libc_function_address = null
+
+    var symbols = null
+
+    symbols = Module.enumerateSymbolsSync(libc_so_name)
+
+    for (var i = 0; i < symbols.length; i++) {
+        var symbol = symbols[i]
+        var name = symbol.name
+        var address = symbol.address
+        // 使用android native中的方法名
+        if ((name.indexOf(libc_function_name) >= 0) && (name.indexOf(".cpp") == -1)) {
+            console.log('name:', name)
+            console.log('address:', address)
+
+            libc_function_address = address
+        }
+    }
+
+    // c的大函数的signature都可以直接搜到
+    var pthread_create = new NativeFunction(libc_function_address, 'int', ['pointer', 'pointer', 'pointer', 'pointer'])
+
+    Interceptor.replace(libc_function_address, new NativeCallback(function(arg0, arg1, arg2, arg3) {
+        var ret = null
+        if (String(arg2).endsWith('a7c')) {
+            // 这里不能传NULL,会导致报错的(NULL就是空指针但为什么会导致报错呢),是因为NULL的address是0的原因吗? 可以传一个枚举出来的合理的函数地址, 如何传一个NULL pointer呢?
+            // ret = pthread_create(arg0, arg1, NULL, arg3)
+            ret = 0
+            console.log(detect_frida_loop_name, 'is passed')
+        } else {
+            ret = pthread_create(arg0, arg1, arg2, arg3)
+            console.log('normal pthread_create')
+        }
+        return ret
+    }, 'int', ['pointer', 'pointer', 'pointer', 'pointer']))
+}
+
+```
+
+#### 5.1.4 inline hook
+
+- IDA(IDA View)判断是ARM指令还是thumb指令
+    - 方法一
+        1. Options - General - Number of opcodes byte 修改为8(或4)
+        2. 如果地址显示是2个数字(可能需要按一下空格)就是thumb,地址需要+1,4个数字就不需要+1
+    - 方法二
+        1. 地址的奇偶
+        2. 奇数是thumb指令
+
+```reflect.js
+function inline_hook() {
+    var libnative_lib_so_name = "libnative-lib.so"
+    var existed = if_module_existed(libnative_lib_so_name)
+    if (existed) {
+        console.log(libnative_lib_so_name, 'is existed!')
+    } else {
+        console.log(libnative_lib_so_name, 'is not existed!')
+    }
+
+    var libnative_lib_so_address  = Module.findBaseAddress(libnative_lib_so_name)
+    console.log("libnative_lib_so_address =", libnative_lib_so_address)
+
+    // 先找到module然后找到想要hook的符号
+    if (libnative_lib_so_address) {
+        var offset = 0xFC28
+        var FC28_address = libnative_lib_so_address.add(offset)
+
+
+        Interceptor.attach(FC28_address, {
+            onEnter: function(args) {
+                // hook地址没有参数,一般只能打印寄存器
+                // 因为是64位所以是x
+                // IDA找到dynamicallyRegisteredString,找偏移末尾是C28的前面一点下断点,可以发现断点到C28时候寄存器的值和inline_hook是一致的
+                console.log('this.context.PC =', this.context.PC)
+                console.log('this.context.x1 =', this.context.x1)
+                console.log('this.context.x5 =', this.context.x5)
+                console.log('this.context.x10 =', this.context.x10)
+            },
+            onLeave: function(ret) {
+                console.log('ret =', ret)
+            }
+        })
+    }
+}
+```
+
+## 6. Frida hook native App实战
+
+完整项目在 6_xman.js
+
+如果so中的函数符号被strip掉的话IDA是搜不到的
+
+### 6.1 反调试
+
+- 相关文章
+    - [Android反调试技术整理与实践](https://gtoad.github.io/2017/06/25/Android-Anti-Debug/)
+    - [APK反逆向](https://github.com/gnaixx/anti-debug)
+
+### 6.2 xman
+
+1. jadx反编译发现内容主要在so中
+2. IDA发现是动态注册
+3. 用yang神的hook_RegisterNatives看一下
+4. 找到偏移对应的native函数偏移,IDA直接跳转到对应函数(IDA可以尝试修改函数第一个参数类型为JNIEnv *)
+5. 看native函数来猜一下整个流程,然后来trace验证一下
+6. hook strcmp过验证 / 两种写入文件过验证
+
+```xman.js
+function hook_MyApp() {
+    var MyApp = Java.use('com.gdufs.xman.MyApp')
+    MyApp.m.value = 1
+
+    var Toast = Java.use('android.widget.Toast')
+    Toast.makeText.overload('android.content.Context', 'java.lang.CharSequence', 'int').implementation = function(arg0, arg1, arg2) {
+        console.log('arg2:', arg1)
+        var ret = this.makeText(arg0, arg1, arg2)
+        return ret
+    }
+}
+
+
+function if_module_existed(module_name_pattern) {
+    var modules = Process.enumerateModules()
+    var module = null
+    var existed = false
+
+    for (var i = 0; i < modules.length; i++) {
+        module = modules[i]
+
+        if (module.name.indexOf(module_name_pattern) != -1) {
+            if (!existed) {
+                console.log('search module_name_pattern[' + module_name_pattern + '] found:')
+                console.log()
+                existed = !existed
+            }
+            console.log('module.name = ' + module.name)
+            console.log('module.base = ' + module.base)
+            console.log()
+        }
+    }
+    return existed
+}
+
+
+function hook_libc_so() {
+    var libc_so_name = "libc.so"
+    var existed = if_module_existed(libc_so_name)
+    if (existed) {
+        console.log(libc_so_name, 'is existed!')
+    } else {
+        console.log(libc_so_name, 'is not existed!')
+    }
+
+    var libc_so_address  = Module.findBaseAddress(libc_so_name)
+    console.log("libc_so_address =", libc_so_address)
+
+    var libc_function_name = 'strcmp'
+    var libc_function_address = null
+
+    var symbols = null
+
+    symbols = Module.enumerateSymbolsSync(libc_so_name)
+
+    for (var i = 0; i < symbols.length; i++) {
+        var symbol = symbols[i]
+        var name = symbol.name
+        var address = symbol.address
+        if ((name.indexOf(libc_function_name) >= 0) && (name.indexOf(".cpp") == -1)) {
+            console.log('name:', name)
+            console.log('address:', address)
+
+            libc_function_address = address
+        }
+    }
+
+    var libc_function = new NativeFunction(libc_function_address, 'int', ['pointer', 'pointer'])
+
+
+    Interceptor.replace(libc_function_address, new NativeCallback(function(s1, s2) {
+        var char_star_s1 = ptr(s1).readCString()
+        var char_star_s2 = ptr(s2).readCString()
+
+        if (char_star_s2 == 'EoPAoY62@ElRD') {
+            console.log('char_star_s1 =', char_star_s1)
+            console.log('char_star_s2 =', char_star_s2)
+            return 0
+        }
+
+        var ret = libc_function(s1, s2)
+        return ret
+    }, 'int', ['pointer', 'pointer']))
+}
+
+
+function frida_write_reg(){
+    var file = new File("/sdcard/reg.dat","w+")
+    file.write("EoPAoY62@ElRD")
+    file.flush()
+    file.close()
+
+    console.log('frida_write_reg')
+}
+
+
+// 主动调用so函数
+function hook_libc_so_write_reg(){
+    var fopen_address = Module.findExportByName("libc.so", "fopen")
+    var fputs_address = Module.findExportByName("libc.so", "fputs")
+    var fclose_address = Module.findExportByName("libc.so", "fclose")
+    console.log('fopen_address =', fopen_address)
+    console.log('fputs_address =', fputs_address)
+    console.log('fclose_address =', fclose_address)
+
+    var fopen = new NativeFunction(fopen_address, "pointer", ["pointer", "pointer"])
+    var fputs = new NativeFunction(fputs_address, "int", ["pointer", "pointer"])
+    var fclose = new NativeFunction(fclose_address, "int", ["pointer"])
+
+    // 创建C的字符串,不能直接传入js的字符串
+    var filename = Memory.allocUtf8String("/sdcard/reg.dat")
+    var mode = Memory.allocUtf8String("w+")
+    var file = fopen(filename, mode)
+    var contents = Memory.allocUtf8String("EoPAoY62@ElRD")
+    var fputs_ret = fputs(contents, file)
+    fclose(file)
+
+    console.log('fputs_ret =', fputs_ret)
+    console.log('hook_libc_so_write_reg')
+}
+
+
+function main() {
+    // Java.perform(hook_MyApp)
+
+    // hook_libc_so()
+
+    // frida_write_reg()
+
+    hook_libc_so_write_reg()
+}
+
+
+setImmediate(main)
+
+```
+
+## 7. trace工具链
+
+### 7.1 trace三件套
+
+- trace三件套
+    - [jnitrace: jni](https://github.com/chame1eon/jnitrace)
+    - [frida-trace: libc & ...](https://frida.re/docs/frida-trace/)
+    - strace: syscall
+
+- 源码学习
+    - [frida-hook-libart](https://github.com/lasting-yang/frida_hook_libart)
+
+## 8. init_array开发和逆向自动化
+
+完整项目在 8_Reflect.7z + hook_linker.js
+
+- [init_array原理](https://www.cnblogs.com/bingghost/p/6297325.html)
+- [Android逆向新手答疑解惑篇——JNI与动态注册](https://bbs.pediy.com/thread-224672.htm)
+- [linker加载so(init_array) - hook linker](http://note.youdao.com/noteshare?id=38aa9a5ce7d03a9fd61a21d076eab219)
+- [Android NDK中.init段和.init_array段函数的定义方式](https://www.dllhook.com/post/213.html)
+
+### 8.1 init & init_array
+
+/root/Codes/Reflect/app/src/main/cpp/native-lib.cpp添加
+
+```
+// 先init后init_array
+// 编译生成后在.init段 [名字不可更改]
+extern "C" void _init(void) {
+    LOGI(".init");
+}
+
+// 编译生成后在.init_array段 [名字可以更改]
+__attribute__((__constructor__)) static void dot_init_array() {
+    LOGI(".init_array");
+}
+```
+
+.init可以直接在IDA Function window / Exports 搜到
+
+shift + F7 / IDA View中Ctrl + s: 双击函数可以找到init_array中定义的函数内容
+
+- [32位so通过call_function加载init_array中的方法的流程#2228-2236](http://androidxref.com/6.0.1_r10/xref/bionic/linker/linker.cpp#2228)
+- [IDA调试init_array,按文章下断点](https://www.cnblogs.com/bingghost/p/6297325.html)
+
+/root/Codes/Reflect/app/build.gradle: android - defaultConfig - externalNativeBuild添加
+
+```
+// 编译32位库
+ndk {
+    // Specifies the ABI configurations of your native
+    // libraries Gradle should build and package with your APK.
+    abiFilters "armeabi-v7a"
+}
+```
+
+- 32位(资料多)动态调试init_array(我这边没有debug成功)
+    1. 找 Module - linker
+    2. linker 中找 call_function(其中的参数就是.init和.init_array)
+    3. __dl__ZL13call_functionPKcPFvvES0_ 中的 CODE XREF: __dl__ZL13call_functionPKcPFvvES0_+18↑j 后的 BLX R6(对应文章中的BLX R4)
+    4. F7就是init_array
+
+### 8.2 jnitrace 自吐 JNI_Onload & init_array
+
+```
+JNI_Onload:
+jnitrace -m spawn -l libnative-lib.so com.example.reflect
+
+
+获得如下打印:
+    417 ms [+] JNIEnv->RegisterNatives
+    417 ms |- JNIEnv*          : 0xf39312a0
+    417 ms |- jclass           : 0x85    { com/example/reflect/MainActivity }
+    417 ms |- JNINativeMethod* : 0xffae15c8
+    417 ms |:     0xd8d62495 - dynamicallyRegisteredStringFromJNI()Ljava/lang/String;
+    417 ms |- jint             : 1
+    417 ms |= jint             : 0
+
+    417 ms --------------------------------------------------Backtrace--------------------------------------------------
+    417 ms |-> 0xd8d625e1: _ZN7_JNIEnv15RegisterNativesEP7_jclassPK15JNINativeMethodi+0x2c (libnative-lib.so:0xd8d59000)
+
+
+dynamicallyRegisteredStringFromJNI对应的so中函数的偏移即: 0xd8d62495 - 0xd8d59000 = 0x9495
+
+
+init_array(感谢hanbing老师的脚本):
+没有支持arm64，可以在安装app的时候 adb install --abi armeabi-v7a 强制让app运行在32位模式
+
+function LogPrint(log) {
+    var theDate = new Date();
+    var hour = theDate.getHours();
+    var minute = theDate.getMinutes();
+    var second = theDate.getSeconds();
+    var mSecond = theDate.getMilliseconds()
+
+    hour < 10 ? hour = "0" + hour : hour;
+    minute < 10 ? minute = "0" + minute : minute;
+    second < 10 ? second = "0" + second : second;
+    mSecond < 10 ? mSecond = "00" + mSecond : mSecond < 100 ? mSecond = "0" + mSecond : mSecond;
+
+    var time = hour + ":" + minute + ":" + second + ":" + mSecond;
+    var threadid = Process.getCurrentThreadId();
+    console.log("[" + time + "]" + "->threadid:" + threadid + "--" + log);
+
+}
+
+function hooklinker() {
+    var linkername = "linker";
+    var call_function_addr = null;
+    var arch = Process.arch;
+    LogPrint("Process run in:" + arch);
+    if (arch.endsWith("arm")) {
+        linkername = "linker";
+    } else {
+        linkername = "linker64";
+        LogPrint("arm64 is not supported yet!");
+    }
+
+    var symbols = Module.enumerateSymbolsSync(linkername);
+    for (var i = 0; i < symbols.length; i++) {
+        var symbol = symbols[i];
+        //LogPrint(linkername + "->" + symbol.name + "---" + symbol.address);
+        if (symbol.name.indexOf("__dl__ZL13call_functionPKcPFviPPcS2_ES0_") != -1) {
+            call_function_addr = symbol.address;
+            LogPrint("linker->" + symbol.name + "---" + symbol.address)
+
+        }
+    }
+
+    if (call_function_addr != null) {
+        var func_call_function = new NativeFunction(call_function_addr, 'void', ['pointer', 'pointer', 'pointer']);
+        Interceptor.replace(new NativeFunction(call_function_addr,
+            'void', ['pointer', 'pointer', 'pointer']), new NativeCallback(function (arg0, arg1, arg2) {
+            var functiontype = null;
+            var functionaddr = null;
+            var sopath = null;
+            if (arg0 != null) {
+                functiontype = Memory.readCString(arg0);
+            }
+            if (arg1 != null) {
+                functionaddr = arg1;
+
+            }
+            if (arg2 != null) {
+                sopath = Memory.readCString(arg2);
+            }
+            var modulebaseaddr = Module.findBaseAddress(sopath);
+            LogPrint("after load:" + sopath + "--start call_function,type:" + functiontype + "--addr:" + functionaddr + "---baseaddr:" + modulebaseaddr);
+            if (sopath.indexOf('libnative-lib.so') >= 0 && functiontype == "DT_INIT") {
+                LogPrint("after load:" + sopath + "--ignore call_function,type:" + functiontype + "--addr:" + functionaddr + "---baseaddr:" + modulebaseaddr);
+
+            } else {
+                func_call_function(arg0, arg1, arg2);
+                LogPrint("after load:" + sopath + "--end call_function,type:" + functiontype + "--addr:" + functionaddr + "---baseaddr:" + modulebaseaddr);
+
+            }
+
+        }, 'void', ['pointer', 'pointer', 'pointer']));
+    }
+
+
+}
+
+setImmediate(hooklinker)
+```
+
+### 8.3 frida-trace 对 任意函数的 trace
+
+```
+# -f 启动有时候so没加载会hook不到
+frida-trace -H 192.168.50.42:8888 -I libnative-lib.so com.example.reflect
+
+# 基于单个函数地址的hook
+frida-trace -H 192.168.50.42:8888 -a libnative-lib.so\!0x9495 com.example.reflect
+
+# 几种trace工具的文档和源码去了解一下
+```
+
+## 9. C hook & CModule
+
+完整项目在 9_libnative-lib.so + 9_invoke_so.js + 9_cmodule.js + 9_explore.js + 9_explore.c
+
+### 9.1 参数打印和构造
+
+- Frida JNI相关函数
+    1. jstring是没法直接打印的,java vm中只能转化为char*后打印,和native编程的流程一致
+    2. jni的基本类型,要通过调用jni相关api转化为c++对象才能打印和调用(参数构造可以java.vm.xx/直接获取hook的参数进行传递),因为Interceptor(相当于在libart.so中执行)没有在java.perform里,所以不能使用java的方法
+- NativePointer + Memory
+
+### 9.2 Frida调用C++编写的so
+
+invoke_so.js
+
+```
+/*
+ * frida -H 192.168.50.42:8888 -f com.android.settings -l agent/invoke_so.js --no-pause
+ */
+function invoke_so() {
+    /**
+     * https://github.com/lasting-yang/frida_hook_libart
+     * 导入AntiFrida的libnative-lib.so在settings中执行
+     * root@Nick:~# adb push Downloads/libnative-lib.so /data/local/tmp
+     * root@Nick:~# adb shell su -c "cp /data/local/tmp/libnative-lib.so /data/app/libnative-lib.so"
+     * root@Nick:~# adb shell su -c "chown 1000.1000 /data/app/libnative-lib.so"
+     * root@Nick:~# adb shell su -c "chmod 777 /data/app/libnative-lib.so"
+     * root@Nick:~# adb shell su -c "ls -al /data/app/libnative-lib.so"
+     */
+
+    var module_libnative_lib_so = Module.load("/data/app/libnative-lib.so")
+    var export_function_name = "_Z17detect_frida_loopPv"
+    var export_function_address = module_libnative_lib_so.findExportByName(export_function_name)
+    console.log('export_function_address =', export_function_address)
+
+    var detect_frida_loop = new NativeFunction(export_function_address, 'pointer', ['pointer'])
+    var void_star = Memory.allocUtf8String("hello")
+    detect_frida_loop(void_star)
+    // adb logcat 可以看到开始Frida端口检测
+}
+
+
+function main() {
+    invoke_so()
+}
+
+
+setImmediate(main)
+
+```
+
+### 9.3 CModule
+
+- [CModule](https://frida.re/news/2019/09/18/frida-12-7-released/)
+
+不依赖架构并且不用编译为so直接可以将C代码注入
+
+```shell
+root@Nick:~# frida -H 192.168.50.42:8888 com.android.settings
+[Remote::com.android.settings]-> var cm = new CModule('int add(int a, int b) { return a + b; }')
+[Remote::com.android.settings]-> cm
+{
+    "add": "0x779d1d5000"
+}
+[Remote::com.android.settings]-> var add = new NativeFunction(cm.add, 'int', ['int', 'int'])
+[Remote::com.android.settings]-> add(1, 2)
+3
+
+```
+
+cmodule.js
+
+```
+/**
+ * 1.
+ * frida -H 192.168.50.42:8888 com.android.settings -l agent/cmodule.js --runtime=v8
+ * 
+ * 2.
+ * root@Nick:~/Downloads# ./frida-server-12.8.0-linux-x86_64
+ * root@Nick:~# mousepad cmodule.md
+ */
+function open_1() {
+    // 无法保存文件内容了!
+    const m = new CModule(`
+    #include <gum/guminterceptor.h>
+    
+    #define EPERM 1
+    
+    int
+    open (const char * path,
+          int oflag,
+          ...)
+    {
+      GumInvocationContext * ic;
+    
+      ic = gum_interceptor_get_current_invocation ();
+      ic->system_error = EPERM;
+    
+      return -1;
+    }
+    `)
+    
+    const openImpl = Module.getExportByName(null, 'open')
+    console.log('openImpl = ', openImpl)
+    
+    Interceptor.replace(openImpl, m.open)
+    
+}
+
+
+function open_2() {
+    const openImpl = Module.getExportByName(null, 'open')
+
+    Interceptor.attach(openImpl, new CModule(`
+      #include <gum/guminterceptor.h>
+      #include <stdio.h>
+    
+      void
+      onEnter (GumInvocationContext * ic)
+      {
+        const char * path;
+    
+        path = gum_invocation_context_get_nth_argument (ic, 0);
+    
+        printf ("open() path=\\"%s\\"\\n", path);
+      }
+    
+      void
+      onLeave (GumInvocationContext * ic)
+      {
+        int fd;
+    
+        fd = (int) gum_invocation_context_get_return_value (ic);
+    
+        printf ("=> fd=%d\\n", fd);
+      }
+    `))
+}
+
+
+function open_3() {
+    const openImpl = Module.getExportByName(null, 'open')
+
+    Interceptor.attach(openImpl, new CModule(`
+            #include <gum/guminterceptor.h>
+
+            extern void onMessage (const gchar * message);
+
+            static void log (const gchar * format, ...);
+
+            void
+            onEnter (GumInvocationContext * ic)
+            {
+                const char * path;
+
+                path = gum_invocation_context_get_nth_argument (ic, 0);
+
+                log ("open() path=\\"%s\\"", path);
+            }
+
+            void
+            onLeave (GumInvocationContext * ic)
+            {
+                int fd;
+
+                fd = (int) gum_invocation_context_get_return_value (ic);
+
+                log ("=> fd=%d", fd);
+            }
+
+            static void
+            log (const gchar * format,
+                ...)
+            {
+                gchar * message;
+                va_list args;
+
+                va_start (args, format);
+                message = g_strdup_vprintf (format, args);
+                va_end (args);
+
+                onMessage (message);
+
+                g_free (message);
+            }
+            `,
+            {
+                onMessage: new NativeCallback(messagePtr => {
+                    const message = messagePtr.readUtf8String()
+                    console.log('onMessage:', message)
+                }, 'void', ['pointer'])
+            }
+        )
+    )
+}
+
+
+function open_4() {
+    const calls = Memory.alloc(4)
+
+    const openImpl = Module.getExportByName(null, 'open')
+
+    Interceptor.attach(
+        openImpl,
+        new CModule(`
+                #include <gum/guminterceptor.h>
+
+                extern volatile gint calls;
+
+                void
+                onEnter (GumInvocationContext * ic)
+                {
+                    g_atomic_int_add (&calls, 1);
+                }
+            `,
+            { calls }
+        )
+    )
+
+    setInterval(() => {
+        console.log('Calls so far:', calls.readInt())
+    }, 1000)
+}
+
+
+function main() {
+    // open_1()
+
+    // open_2()
+
+    // open_3()
+
+    open_4()
+}
+
+setImmediate(main)
+
+```
+
+### 9.4 Frida C + JS 混合编程
+
+- [Frida C + JS 混合编程](https://frida.re/docs/javascript-api/)
+
+root@Nick:~/Codes/github/others/frida-agent-example# frida -p 0 -l agent/explore.js -C agent/explore.c
+
+explore.js
+
+```
+console.log('Hello from Javascript')
+
+var counter = Memory.alloc(4)
+var bump = null
+cs.counter = counter
+
+rpc.exports.init = function () {
+    bump = new NativeFunction(cm.bump, 'void', ['int'])
+}
+
+```
+
+explore.c
+
+```
+extern int counter;
+
+void init(void) {
+    frida_log("Hello from C");
+}
+
+void bump(int n) {
+    counter += n;
+}
+
+```
+
+## 关于逆向学习的几个观点
 
 1. 开发是核心，以开发的眼光看待问题
-2. 学会hook大法之后是几乎不需要手动调的
+2. 学会hook大法之后trace是几乎不需要手动调的
+3. 降维打击,我就是系统
+4. 先抄大佬的代码学习
 
+QA:
+有时候-f so还没有加载hook不到,可以延迟hook吗?(但不能attach,有时候attach已经错过调用时机了)
