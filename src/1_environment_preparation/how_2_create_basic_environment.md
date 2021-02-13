@@ -493,6 +493,10 @@ root@Nick:~# proxychains pip install objection==1.9.5 -i https://mirrors.aliyun.
 
 
 # 安装vscode和frida的代码补全工具
+# https://github.com/nodesource/distributions/blob/8aa9b1fce756335c356bcb8dd457366b58d47030/README.md#debmanual
+# 无法成功安装node&npm的时候尝试先安装node newest lts后装pyenv
+# curl -sL https://deb.nodesource.com/setup_lts.x | bash -
+# apt-get install -y nodejs
 root@Nick:~# dpkg -i Downloads/code_1.48.0-1597304990_amd64.deb 
 root@Nick:~# mkdir -p Codes/github/others/
 root@Nick:~# cd Codes/github/others/
