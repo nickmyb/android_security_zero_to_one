@@ -173,8 +173,9 @@ traceroute
     5. charles配置(开启https抓包): Proxy - SSL Proxying Settings - Include - Add - Host:* Port:*
     6. charles配置: WIFI中配置http代理(8888) - 打开chls.pro/ssl安装证书 - 关闭http代理
     7. 手机配置: (复制charles证书到根证书) - su - mount -o remount,rw / - cd /data/misc/user/0/cacerts-added/ - cp -a * /etc/security/cacerts/ - mount -o remount,ro /
-    8. 有些手机remount需要以下操作(adb root - adb disable-verity - adb reboot - adb root - adb remount) nougat需要 - mount -o rw,remount / - cp -a * /system/security/cacerts/
-    9. 客户端验证服务器部分结束
+    8. 有些手机remount需要以下操作(adb root - adb disable-verity - adb reboot - adb root - adb remount) nougat需要 - mount -o rw,remount / 或者 mount -o rw,remount /system - cp -a * /system/security/cacerts/
+    9. 直接推送证书(电脑导出charles证书 - openssl x509 -subject_hash_old -in charles-ssl-proxying-certificate.pem - adb push charles-ssl-proxying-certificate.pem /sdcard/xxx.0/1 - su - mount -o rw,remount /system - cp /sdcard/xxx.0 /etc/security/cacerts/ - cd /etc/security/cacerts/ - chmod 644 f218ebbb.0)
+    10. 客户端验证服务器部分结束
 
 ## 5. HTTPS.C/S校验核心原理
 
