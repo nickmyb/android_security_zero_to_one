@@ -1,0 +1,12 @@
+- 相关资料:
+    - [Xposed](https://github.com/rovo89)
+    - [Xposed魔改](https://bbs.pediy.com/thread-258639.htm)
+    - [安卓应用安全学习](https://github.com/r0ysue/AndroidSecurityStudy)
+    - [Xposed模块编写教程](https://www.freebuf.com/articles/terminal/189021.html)
+    - [Xposed调用栈](https://blog.csdn.net/QQ1084283172/article/details/79378374)
+    - [GravityBox](https://github.com/GravityBox/GravityBox)
+    - [Xposed API](https://api.xposed.info/reference/packages.html)
+    - [nanohttpd](https://github.com/NanoHttpd/nanohttpd)
+    - [Xposed nanohttpd实例](https://curz0n.github.io/2018/05/31/nanohttpd_encrypt/)
+    - [android nanohttpd](https://blog.csdn.net/u013738666/article/details/104776840)
+
